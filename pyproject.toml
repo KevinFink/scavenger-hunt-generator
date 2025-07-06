@@ -1,0 +1,21 @@
+[project]
+name = "scavenger-hunt"
+version = "0.1.0"
+description = "Create multi-group scavenger hunt from list of clues and answers."
+authors = [
+    {name = "Kevin Fink",email = "kevin@lightercapital.com"}
+]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "google-api-python-client>=2.0.0",
+    "google-auth-httplib2>=0.1.0",
+    "google-auth-oauthlib>=1.0.0",
+    "ruff>=0.1.0",
+    "pre-commit>=3.0.0",
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

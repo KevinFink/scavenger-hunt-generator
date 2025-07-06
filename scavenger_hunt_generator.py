@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+
+import argparse
+import random
+import sys
+from typing import List, Dict, Optional
+from dataclasses import dataclass
+import os
+import pickle
+from pathlib import Path
+
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+import time
+import socket
+from datetime import datetime
+import http.client
+
+# Google Sheets API scopes
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+
+@dataclass
+class Clue:
+    """Represents a clue in the scavenger hunt"""
+
+    question: str
+    answer: str
+
+
+@dataclass
+class ClueSequence:
+    """Represents a clue sequence for a group"""
+
+    clue_number: int
+    question: str
+    location: str
+    next_clue: str
+
+
+class GoogleSheetsHandler:
+    """Handle Google Sheets integration for scavenger hunt"""
+
+    def __init__(
+        self, credentials_path: Optional[str] = None, token_path: Optional[str] = None
+    ):
+        self.credentials_path = credentials_path or Path("credentials.json")
+        self.token_path = token_path or Path("token_rw.pickle")
+        self.service = None
+        self.drive_service = None
+
+    def establish_google_creds(self):
+        """Establish Google credentials for API access"""
+        creds = None
+
+        if os.path.exists(self.token_path):
+            with open(self.token_path, "rb") as token:
+                creds = pickle.load(token)
+
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    self.credentials_path, SCOPES
+                )
+                creds = flow.run_local_server(port=0)
+            with open(self.token_path, "wb") as token:
+                pickle.dump(creds, token)
+
+        return creds
+
+    def get_google_sheets_service(self):
+        """Get Google Sheets service instance"""
+        if self.service is None:
+            credentials = self.establish_google_creds()
+            self.service = build(
+                "sheets", "v4", credentials=credentials, cache_discovery=False
+            )
+        return self.service
+
+    def get_google_drive_service(self):
+        """Get Google Drive service instance"""
+        if self.drive_service is None:
+            credentials = self.establish_google_creds()
+            self.drive_service = build(
+                "drive", "v3", credentials=credentials, cache_discovery=False
+            )
+        return self.drive_service
+
+    def _gsheet_execute(self, method, quiet: bool = False):
+        """Execute a Google Sheets API method with retry logic"""
+        success = False
+        while not success:
+            try:
+                response = method.execute()
+                success = True
+            except HttpError as e:
+                if e.resp.status >= 500 or e.resp.status == 429 or e.resp.status == 409:
+                    if not quiet:
+                        print(
+                            f"HttpError {e.resp.status}: {http.client.responses.get(e.resp.status, 'Unknown Error')}"
+                        )
+                        print(
+                            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: Sleeping for 30 seconds before retrying..."
+                        )
+                    time.sleep(30)
+                else:
+                    raise
+            except (TimeoutError, socket.error) as e:
+                if not quiet:
+                    print(f"Network error: {e}")
+                    print(
+                        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}: Sleeping for 30 seconds before retrying..."
+                    )
+                time.sleep(30)
+        return response
+
+    def find_google_sheet(self, sheet_name: str) -> Optional[str]:
+        """Find a Google Sheet by name"""
+        service = self.get_google_drive_service()
+
+        query = f"name = '{sheet_name}' and mimeType = 'application/vnd.google-apps.spreadsheet'"
+        try:
+            response = (
+                service.files()
+                .list(q=query, fields="files(id, name)", pageSize=1)
+                .execute()
+            )
+            files = response.get("files", [])
+            if files:
+                return files[0]["id"]
+            return None
+        except Exception as e:
+            print(f"Error while searching for spreadsheet: {e}")
+            return None
+
+    def sheet_exists(self, spreadsheet_id: str, sheet_name: str) -> bool:
+        """Check if a sheet exists in the spreadsheet"""
+        service = self.get_google_sheets_service()
+
+        try:
+            method = service.spreadsheets().get(spreadsheetId=spreadsheet_id)
+            result = self._gsheet_execute(method)
+            existing_sheets = [
+                sheet["properties"]["title"] for sheet in result.get("sheets", [])
+            ]
+            return sheet_name in existing_sheets
+        except Exception:
+            return False
+
+    def read_clues_from_sheet(
+        self, spreadsheet_id: str, sheet_name: str = "Clues"
+    ) -> List[Clue]:
+        """Read clues from a Google Sheet"""
+        service = self.get_google_sheets_service()
+
+        range_name = f"{sheet_name}!A:B"
+        method = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=spreadsheet_id, range=range_name)
+        )
+        result = self._gsheet_execute(method)
+
+        values = result.get("values", [])
+        if not values:
+            raise ValueError("No data found in the sheet")
+
+        clues = []
+        # Skip header row if present
+        if values[0] and (
+            values[0][0].lower() == "clue" or values[0][0].lower() == "question"
+        ):
+            start_row = 1
+        else:
+            start_row = 0
+
+        for row in values[start_row:]:
+            if len(row) >= 2 and row[0] and row[1]:
+                clues.append(Clue(question=row[0].strip(), answer=row[1].strip()))
+
+        return clues
+
+    def create_sheet_if_not_exists(self, spreadsheet_id: str, sheet_name: str):
+        """Create a new sheet if it doesn't exist"""
+        service = self.get_google_sheets_service()
+
+        # Check if sheet exists
+        try:
+            method = service.spreadsheets().get(spreadsheetId=spreadsheet_id)
+            result = self._gsheet_execute(method)
+            existing_sheets = [
+                sheet["properties"]["title"] for sheet in result.get("sheets", [])
+            ]
+
+            if sheet_name not in existing_sheets:
+                # Create the sheet
+                body = {
+                    "requests": [{"addSheet": {"properties": {"title": sheet_name}}}]
+                }
+                method = service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id, body=body
+                )
+                self._gsheet_execute(method)
+                print(f"Created sheet: {sheet_name}")
+        except Exception as e:
+            print(f"Error creating sheet {sheet_name}: {e}")
+
+    def create_google_sheet(self, title: str) -> str:
+        """Create a new Google Sheet"""
+        service = self.get_google_sheets_service()
+
+        spreadsheet = {"properties": {"title": title}}
+
+        method = service.spreadsheets().create(body=spreadsheet, fields="spreadsheetId")
+        result = self._gsheet_execute(method)
+
+        return result.get("spreadsheetId")
+
+    def share_google_sheet(
+        self, spreadsheet_id: str, emails: List[str], role: str = "writer"
+    ) -> bool:
+        """Share a Google Sheet with specific email addresses"""
+        service = self.get_google_drive_service()
+
+        success = True
+        for email in emails:
+            try:
+                permission = {"type": "user", "role": role, "emailAddress": email}
+
+                method = service.permissions().create(
+                    fileId=spreadsheet_id, body=permission, sendNotificationEmail=True
+                )
+
+                self._gsheet_execute(method)
+                print(f"✅ Shared with {email} ({role} access)")
+
+            except Exception as e:
+                print(f"❌ Failed to share with {email}: {e}")
+                success = False
+
+        return success
+
+    def write_to_sheet(
+        self, spreadsheet_id: str, sheet_name: str, data: List[List[str]]
+    ):
+        """Write data to a Google Sheet"""
+        service = self.get_google_sheets_service()
+
+        # Create sheet if it doesn't exist
+        self.create_sheet_if_not_exists(spreadsheet_id, sheet_name)
+
+        # Clear existing data
+        range_name = sheet_name
+        method = (
+            service.spreadsheets()
+            .values()
+            .clear(spreadsheetId=spreadsheet_id, range=range_name)
+        )
+        self._gsheet_execute(method)
+
+        # Write new data
+        body = {"values": data}
+        method = (
+            service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=spreadsheet_id,
+                range=range_name,
+                valueInputOption="RAW",
+                body=body,
+            )
+        )
+        self._gsheet_execute(method)
+        print(f"Updated sheet: {sheet_name}")
+
+
+class ScavengerHuntGenerator:
+    """Generate scavenger hunt sequences for multiple groups"""
+
+    def __init__(self, clues: List[Clue], num_groups: int):
+        self.clues = clues
+        self.num_groups = num_groups
+
+    def generate_hunt(self) -> Dict[int, List[ClueSequence]]:
+        """Generate scavenger hunt sequences for all groups"""
+        # Use all available clues
+        selected_clues = self.clues
+
+        # Create different sequences for each group
+        all_sequences = {}
+
+        for group_num in range(1, self.num_groups + 1):
+            # Create a random permutation of clues for this group
+            shuffled_clues = selected_clues.copy()
+            random.shuffle(shuffled_clues)
+
+            # Create sequence for this group
+            sequence = []
+            for i, clue in enumerate(shuffled_clues):
+                clue_number = i + 1
+
+                # Determine the next clue
+                if i < len(shuffled_clues) - 1:
+                    next_clue = shuffled_clues[i + 1].question
+                else:
+                    next_clue = "The End"
+
+                sequence.append(
+                    ClueSequence(
+                        clue_number=clue_number,
+                        question=clue.question,
+                        location=f"Hide this at/with: {clue.answer}",
+                        next_clue=f"{clue_number + 1}. {next_clue}"
+                        if next_clue != "The End"
+                        else f"{clue_number + 1}. The End",
+                    )
+                )
+
+            all_sequences[group_num] = sequence
+
+        return all_sequences
+
+    def format_master_sheet(
+        self, all_sequences: Dict[int, List[ClueSequence]]
+    ) -> List[List[str]]:
+        """Format data for the master sheet"""
+        data = [["Group", "Clue Number", "Question", "Location", "Next Clue"]]
+
+        for group_num, sequence in all_sequences.items():
+            for clue_seq in sequence:
+                data.append(
+                    [
+                        f"Group {group_num}",
+                        str(clue_seq.clue_number),
+                        clue_seq.question,
+                        clue_seq.location,
+                        clue_seq.next_clue,
+                    ]
+                )
+
+        return data
+
+    def format_group_sheet(
+        self, group_num: int, sequence: List[ClueSequence]
+    ) -> List[List[str]]:
+        """Format data for an individual group sheet"""
+        data = [["Location", "Clue"]]
+
+        # First row: starting clue given to the group
+        data.append([f"Group {group_num} First Clue", f"1. {sequence[0].question}"])
+
+        # Subsequent rows: where to hide each clue and what clue will be found there
+        for clue_seq in sequence:
+            data.append([clue_seq.location, clue_seq.next_clue])
+
+        return data
+
+
+def main():
+    """Main function to run the scavenger hunt generator"""
+    parser = argparse.ArgumentParser(
+        description="Generate scavenger hunt from Google Sheets",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--num_groups", type=int, required=True, help="Number of groups"
+    )
+    parser.add_argument(
+        "--spreadsheet_name", type=str, help="Name of the Google Spreadsheet to find"
+    )
+    parser.add_argument(
+        "--spreadsheet_id", type=str, help="ID of the Google Spreadsheet"
+    )
+    parser.add_argument(
+        "--credentials_path", type=str, help="Path to Google credentials JSON file"
+    )
+    parser.add_argument(
+        "--token_path", type=str, help="Path to store/load Google API token"
+    )
+    parser.add_argument(
+        "--input_sheet",
+        type=str,
+        default="Clues",
+        help="Name of the input sheet with clues",
+    )
+    parser.add_argument("--seed", type=int, help="Random seed for reproducible results")
+    parser.add_argument(
+        "--share",
+        type=str,
+        default="kevin@fink.com",
+        help="Comma-separated list of email addresses to share with",
+    )
+
+    args = parser.parse_args()
+
+    # Set random seed if provided
+    if args.seed:
+        random.seed(args.seed)
+
+    # Validate arguments
+    if not args.spreadsheet_name and not args.spreadsheet_id:
+        print("Error: Must provide either --spreadsheet_name or --spreadsheet_id")
+        sys.exit(1)
+
+    # Initialize Google Sheets handler
+    sheets_handler = GoogleSheetsHandler(
+        credentials_path=args.credentials_path, token_path=args.token_path
+    )
+
+    try:
+        # Find or use the spreadsheet
+        created_new_spreadsheet = False
+        if args.spreadsheet_id:
+            spreadsheet_id = args.spreadsheet_id
+        else:
+            spreadsheet_id = sheets_handler.find_google_sheet(args.spreadsheet_name)
+            if not spreadsheet_id:
+                print(
+                    f"Spreadsheet '{args.spreadsheet_name}' not found. Creating new spreadsheet..."
+                )
+                spreadsheet_id = sheets_handler.create_google_sheet(
+                    args.spreadsheet_name
+                )
+                created_new_spreadsheet = True
+                print(
+                    f"Created new spreadsheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+                )
+
+                # Create initial Clues sheet with sample data
+                sample_clues = [
+                    ["Clue", "Answer"],
+                    ["What has keys but can't open locks?", "A piano"],
+                    ["What has a face and two hands but no arms or legs?", "A clock"],
+                    ["Who created this scavenger hunt?", "Kevin"],
+                ]
+                sheets_handler.write_to_sheet(
+                    spreadsheet_id, args.input_sheet, sample_clues
+                )
+                print(f"Created sample '{args.input_sheet}' sheet with example clues")
+
+        print(
+            f"Using spreadsheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+        )
+
+        # Share the spreadsheet if it was newly created
+        if created_new_spreadsheet and args.share:
+            share_emails = [email.strip() for email in args.share.split(",")]
+            print(f"Sharing spreadsheet with: {', '.join(share_emails)}")
+            sheets_handler.share_google_sheet(spreadsheet_id, share_emails)
+
+        # Check if the input sheet exists
+        if not sheets_handler.sheet_exists(spreadsheet_id, args.input_sheet):
+            print(
+                f"Sheet '{args.input_sheet}' not found. Creating it with sample data..."
+            )
+
+            # Create the sheet with sample data
+            sample_clues = [
+                ["Clue", "Answer"],
+                ["What has keys but can't open locks?", "A piano"],
+                ["What has a face and two hands but no arms or legs?", "A clock"],
+                ["Who created this scavenger hunt?", "Kevin"],
+            ]
+            sheets_handler.write_to_sheet(
+                spreadsheet_id, args.input_sheet, sample_clues
+            )
+
+            print(f"\n✅ Created '{args.input_sheet}' sheet with sample data.")
+            print(
+                "📝 Please populate the sheet with your clues and run the script again."
+            )
+            print(
+                f"🔗 Edit the spreadsheet here: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
+            )
+            print("\nFormat: Column A = Clue/Question, Column B = Answer/Location")
+            sys.exit(0)
+
+        # Read clues from the sheet
+        print(f"Reading clues from sheet '{args.input_sheet}'...")
+        clues = sheets_handler.read_clues_from_sheet(spreadsheet_id, args.input_sheet)
+        print(f"Found {len(clues)} clues")
+
+        # Generate the scavenger hunt
+        print(f"Generating hunt for {args.num_groups} groups...")
+        generator = ScavengerHuntGenerator(clues, args.num_groups)
+        all_sequences = generator.generate_hunt()
+
+        # Write master sheet
+        print("Writing master sheet...")
+        master_data = generator.format_master_sheet(all_sequences)
+        sheets_handler.write_to_sheet(spreadsheet_id, "Master", master_data)
+
+        # Write individual group sheets
+        for group_num, sequence in all_sequences.items():
+            print(f"Writing Group {group_num} sheet...")
+            group_data = generator.format_group_sheet(group_num, sequence)
+            sheets_handler.write_to_sheet(
+                spreadsheet_id, f"Group {group_num}", group_data
+            )
+
+        print("\nScavenger hunt generated successfully!")
+        print(f"View results: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
+        print("\nInstructions:")
+        print("1. Print the 'Master' sheet for the hunt organizer")
+        print("2. For each group sheet:")
+        print("   - Print the sheet")
+        print("   - Give the first row (first clue) to the group at the start")
+        print(
+            "   - Hide the remaining clues at the locations specified in the 'Location' column"
+        )
+
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
