@@ -1,0 +1,17 @@
+# Google API credentials
+credentials.json
+token_rw.pickle
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
