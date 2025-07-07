@@ -14,8 +14,9 @@
 - Main classes: `GoogleSheetsHandler` (API wrapper), `ScavengerHuntGenerator` (hunt logic)
 - Data models: `Clue` (question/answer), `ClueSequence` (generated hunt sequence)
 - External dependencies: Google Sheets API, Google Drive API for sharing
-- Input: Google Sheets with "Clues" sheet (columns: question, answer)
-- Output: Master sheet + individual group sheets with randomized clue sequences
+- Input: Google Sheets with "Clues" sheet (columns: question, answer/location/person)
+- Output: Master sheet + individual group sheets with constraint-based clue sequences
+- Constraints: No shared first clues, no shared consecutive clue pairs between groups, last clue from sheet is final clue for all groups
 
 ## Code Style
 - Python 3.x with type hints (typing module)

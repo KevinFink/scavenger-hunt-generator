@@ -5,6 +5,16 @@ find the "locations" pointed to by clues as fast as possible.
 
 ## Setup
 
+### Option 1: Google Apps Script (Recommended)
+For the easiest setup, use the Google Apps Script version that runs directly in Google Sheets:
+
+1. See [APPS_SCRIPT_SETUP.md](APPS_SCRIPT_SETUP.md) for detailed instructions
+2. Copy the code from `scavenger_hunt_script.js` into Google Apps Script
+3. No installation required - works entirely within Google Sheets!
+
+### Option 2: Command Line (Python)
+For command line usage:
+
 1. Install dependencies:
    ```bash
    poetry install
@@ -27,7 +37,7 @@ parameter (--num_groups).
 The clues will be given in a random order to each group, so that they can't just follow another group around. The first
 clue will be given to each group, and they will have to find the next clue based on the answer to the previous clue.
 
-The last clue will be the same for every group, and will lead to a final location where the hunt ends.
+The last clue from the Clues sheet will be the same for every group, and will lead to a final location where the hunt ends.
 
 Each clue will be numbered, and that number will appear on the next clue, so that the group knows they are on the right
 track. If they find a clue with the wrong number, they know they found the wrong one, and should keep looking.

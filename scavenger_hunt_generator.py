@@ -289,43 +289,107 @@ class ScavengerHuntGenerator:
         self.num_groups = num_groups
 
     def generate_hunt(self) -> Dict[int, List[ClueSequence]]:
-        """Generate scavenger hunt sequences for all groups"""
+        """Generate scavenger hunt sequences for all groups with constraints"""
         # Use all available clues
         selected_clues = self.clues
+        
+        if len(selected_clues) < 2:
+            raise ValueError("Need at least 2 clues to generate a hunt")
+
+        # Reserve the last clue as the final clue for all groups
+        final_clue = selected_clues[-1]
+        randomizable_clues = selected_clues[:-1]
 
         # Create different sequences for each group
         all_sequences = {}
+        used_first_clues = set()
+        used_consecutive_pairs = set()
 
         for group_num in range(1, self.num_groups + 1):
-            # Create a random permutation of clues for this group
-            shuffled_clues = selected_clues.copy()
-            random.shuffle(shuffled_clues)
+            sequence = None
+            attempts = 0
+            max_attempts = 100  # Prevent infinite loops
 
-            # Create sequence for this group
-            sequence = []
-            for i, clue in enumerate(shuffled_clues):
-                clue_number = i + 1
+            # Keep trying until we find a valid sequence
+            while sequence is None and attempts < max_attempts:
+                attempts += 1
 
-                # Determine the next clue
-                if i < len(shuffled_clues) - 1:
-                    next_clue = shuffled_clues[i + 1].question
-                else:
-                    next_clue = "The End"
+                # Create a random permutation of randomizable clues for this group
+                shuffled_clues = randomizable_clues.copy()
+                random.shuffle(shuffled_clues)
 
-                sequence.append(
+                # Check if this sequence violates constraints
+                if self._violates_constraints(shuffled_clues, used_first_clues, used_consecutive_pairs):
+                    continue  # Try again with a different shuffle
+
+                # Create sequence for this group (randomizable clues + final clue)
+                candidate_sequence = []
+                
+                # Add the randomizable clues
+                for i, clue in enumerate(shuffled_clues):
+                    clue_number = i + 1
+
+                    # Determine the next clue
+                    if i < len(shuffled_clues) - 1:
+                        next_clue = shuffled_clues[i + 1].question
+                    else:
+                        # Next clue is the final clue
+                        next_clue = final_clue.question
+
+                    candidate_sequence.append(
+                        ClueSequence(
+                            clue_number=clue_number,
+                            question=clue.question,
+                            location=f"Hide this at/with: {clue.answer}",
+                            next_clue=f"{clue_number + 1}. {next_clue}",
+                        )
+                    )
+
+                # Add the final clue (same for all groups)
+                candidate_sequence.append(
                     ClueSequence(
-                        clue_number=clue_number,
-                        question=clue.question,
-                        location=f"Hide this at/with: {clue.answer}",
-                        next_clue=f"{clue_number + 1}. {next_clue}"
-                        if next_clue != "The End"
-                        else f"{clue_number + 1}. The End",
+                        clue_number=len(shuffled_clues) + 1,
+                        question=final_clue.question,
+                        location=f"Hide this at/with: {final_clue.answer}",
+                        next_clue=f"{len(shuffled_clues) + 2}. The End",
                     )
                 )
+
+                sequence = candidate_sequence
+
+                # Record constraints for this sequence (only for the randomizable part)
+                self._record_constraints(shuffled_clues, used_first_clues, used_consecutive_pairs)
+
+            if sequence is None:
+                raise ValueError(f"Could not generate valid sequence for Group {group_num} after {max_attempts} attempts. Try using more clues or fewer groups.")
 
             all_sequences[group_num] = sequence
 
         return all_sequences
+
+    def _violates_constraints(self, shuffled_clues: List[Clue], used_first_clues: set, used_consecutive_pairs: set) -> bool:
+        """Check if a sequence violates constraints"""
+        # Rule 1: No group can have the same first clue as another group
+        if shuffled_clues[0].question in used_first_clues:
+            return True
+
+        # Rule 2: No two groups can share two sequential clues
+        for i in range(len(shuffled_clues) - 1):
+            pair = f"{shuffled_clues[i].question}|{shuffled_clues[i + 1].question}"
+            if pair in used_consecutive_pairs:
+                return True
+
+        return False
+
+    def _record_constraints(self, shuffled_clues: List[Clue], used_first_clues: set, used_consecutive_pairs: set):
+        """Record constraints for a valid sequence"""
+        # Record the first clue
+        used_first_clues.add(shuffled_clues[0].question)
+
+        # Record all consecutive pairs
+        for i in range(len(shuffled_clues) - 1):
+            pair = f"{shuffled_clues[i].question}|{shuffled_clues[i + 1].question}"
+            used_consecutive_pairs.add(pair)
 
     def format_master_sheet(
         self, all_sequences: Dict[int, List[ClueSequence]]
@@ -435,10 +499,15 @@ def main():
 
                 # Create initial Clues sheet with sample data
                 sample_clues = [
-                    ["Clue", "Answer"],
-                    ["What has keys but can't open locks?", "A piano"],
-                    ["What has a face and two hands but no arms or legs?", "A clock"],
+                    ["Clue", "Answer/Location/Person"],
+                    ["What has keys but can't open locks?", "Piano"],
+                    ["What has a face and two hands but no arms or legs?", "Clock"],
                     ["Who created this scavenger hunt?", "Kevin"],
+                    ["Where do you cook your meals?", "Kitchen"],
+                    ["What room has books but no bookshelf?", "Library"],
+                    ["Where do cars sleep at night?", "Garage"],
+                    ["What's the coldest appliance in the house?", "Refrigerator"],
+                    ["Where do you wash your hands before dinner?", "Bathroom sink"],
                 ]
                 sheets_handler.write_to_sheet(
                     spreadsheet_id, args.input_sheet, sample_clues
@@ -463,10 +532,15 @@ def main():
 
             # Create the sheet with sample data
             sample_clues = [
-                ["Clue", "Answer"],
-                ["What has keys but can't open locks?", "A piano"],
-                ["What has a face and two hands but no arms or legs?", "A clock"],
+                ["Clue", "Answer/Location/Person"],
+                ["What has keys but can't open locks?", "Piano"],
+                ["What has a face and two hands but no arms or legs?", "Clock"],
                 ["Who created this scavenger hunt?", "Kevin"],
+                ["Where do you cook your meals?", "Kitchen"],
+                ["What room has books but no bookshelf?", "Library"],
+                ["Where do cars sleep at night?", "Garage"],
+                ["What's the coldest appliance in the house?", "Refrigerator"],
+                ["Where do you wash your hands before dinner?", "Bathroom sink"],
             ]
             sheets_handler.write_to_sheet(
                 spreadsheet_id, args.input_sheet, sample_clues
@@ -479,7 +553,7 @@ def main():
             print(
                 f"🔗 Edit the spreadsheet here: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
             )
-            print("\nFormat: Column A = Clue/Question, Column B = Answer/Location")
+            print("\nFormat: Column A = Clue/Question, Column B = Answer/Location/Person")
             sys.exit(0)
 
         # Read clues from the sheet
