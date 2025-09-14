@@ -186,10 +186,10 @@ function generateHuntSequences(clues, numGroups) {
         // Determine the next clue
         let nextClue;
         if (i < shuffledClues.length - 1) {
-          nextClue = `${clueNumber + 1}. ${shuffledClues[i + 1].question}`;
+          nextClue = `Group ${groupNum} Clue ${clueNumber + 1}. ${shuffledClues[i + 1].question}`;
         } else {
           // Next clue is the final clue
-          nextClue = `${clueNumber + 1}. ${finalClue.question}`;
+          nextClue = `Group ${groupNum} Clue ${clueNumber + 1}. ${finalClue.question}`;
         }
         
         candidateSequence.push({
@@ -358,7 +358,7 @@ function createGroupSheet(spreadsheet, groupNum, sequence) {
   const data = [['Location', 'Clue']];
   
   // First row: starting clue given to the group
-  data.push([`Group ${groupNum} First Clue`, `1. ${sequence[0].question}`]);
+  data.push([`Group ${groupNum} First Clue`, `Group ${groupNum} Clue 1. ${sequence[0].question}`]);
   
   // Subsequent rows: where to hide each clue and what clue will be found there
   for (const clueSeq of sequence) {
