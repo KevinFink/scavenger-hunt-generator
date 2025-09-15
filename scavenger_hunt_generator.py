@@ -31,6 +31,7 @@ class Clue:
 
     question: str
     answer: str
+    clue_type: Optional[str] = None
 
 
 @dataclass
@@ -160,7 +161,7 @@ class GoogleSheetsHandler:
         """Read clues from a Google Sheet"""
         service = self.get_google_sheets_service()
 
-        range_name = f"{sheet_name}!A:B"
+        range_name = f"{sheet_name}!A:C"
         method = (
             service.spreadsheets()
             .values()
@@ -183,7 +184,8 @@ class GoogleSheetsHandler:
 
         for row in values[start_row:]:
             if len(row) >= 2 and row[0] and row[1]:
-                clues.append(Clue(question=row[0].strip(), answer=row[1].strip()))
+                clue_type = row[2].strip() if len(row) >= 3 and row[2] else None
+                clues.append(Clue(question=row[0].strip(), answer=row[1].strip(), clue_type=clue_type))
 
         return clues
 
@@ -314,13 +316,17 @@ class ScavengerHuntGenerator:
             while sequence is None and attempts < max_attempts:
                 attempts += 1
 
-                # Create a random permutation of randomizable clues for this group
-                shuffled_clues = randomizable_clues.copy()
-                random.shuffle(shuffled_clues)
-
-                # Check if this sequence violates constraints
-                if self._violates_constraints(shuffled_clues, used_first_clues, used_consecutive_pairs):
-                    continue  # Try again with a different shuffle
+                # Try to create a sequence that alternates types when possible
+                shuffled_clues = self._create_alternating_sequence(randomizable_clues)
+                
+                # If alternating didn't work well, fall back to random shuffle
+                if shuffled_clues is None or self._violates_constraints(shuffled_clues, used_first_clues, used_consecutive_pairs):
+                    shuffled_clues = randomizable_clues.copy()
+                    random.shuffle(shuffled_clues)
+                    
+                    # Check if this sequence violates constraints
+                    if self._violates_constraints(shuffled_clues, used_first_clues, used_consecutive_pairs):
+                        continue  # Try again with a different shuffle
 
                 # Create sequence for this group (randomizable clues + final clue)
                 candidate_sequence = []
@@ -373,13 +379,113 @@ class ScavengerHuntGenerator:
         if shuffled_clues[0].question in used_first_clues:
             return True
 
+        # Rule 1b: First clue must always be a Place
+        if shuffled_clues[0].clue_type and shuffled_clues[0].clue_type.lower() != 'place':
+            return True
+
         # Rule 2: No two groups can share two sequential clues
         for i in range(len(shuffled_clues) - 1):
             pair = f"{shuffled_clues[i].question}|{shuffled_clues[i + 1].question}"
             if pair in used_consecutive_pairs:
                 return True
 
+        # Rule 3: Try to alternate Person and Place types
+        if not self._follows_alternating_types(shuffled_clues):
+            return True
+
         return False
+
+    def _create_alternating_sequence(self, clues: List[Clue]) -> List[Clue]:
+        """Create a sequence that tries to alternate between Person and Place types"""
+        # Separate clues by type
+        person_clues = [c for c in clues if c.clue_type and c.clue_type.lower() == 'person']
+        place_clues = [c for c in clues if c.clue_type and c.clue_type.lower() == 'place']
+        other_clues = [c for c in clues if not c.clue_type or c.clue_type.lower() not in ['person', 'place']]
+        
+        # If we don't have any place clues, return None (first clue must be Place)
+        if len(place_clues) == 0:
+            return None
+            
+        # If we don't have enough typed clues, return None to use random shuffle
+        if len(person_clues) + len(place_clues) < 2:
+            return None
+            
+        # Shuffle each type separately
+        random.shuffle(person_clues)
+        random.shuffle(place_clues)
+        random.shuffle(other_clues)
+        
+        # Build alternating sequence
+        result = []
+        person_idx = 0
+        place_idx = 0
+        
+        # REQUIREMENT: First clue must always be a Place
+        current_type = 'place'
+        
+        # Create alternating sequence
+        total_typed = len(person_clues) + len(place_clues)
+        for i in range(total_typed):
+            if current_type == 'place' and place_idx < len(place_clues):
+                result.append(place_clues[place_idx])
+                place_idx += 1
+                current_type = 'person'
+            elif current_type == 'person' and person_idx < len(person_clues):
+                result.append(person_clues[person_idx])
+                person_idx += 1
+                current_type = 'place'
+            elif place_idx < len(place_clues):
+                result.append(place_clues[place_idx])
+                place_idx += 1
+                current_type = 'person'
+            elif person_idx < len(person_clues):
+                result.append(person_clues[person_idx])
+                person_idx += 1
+                current_type = 'place'
+        
+        # PREFERENCE: Try to make second-to-last clue a Place
+        if len(result) >= 2:
+            second_to_last_idx = len(result) - 2
+            if (result[second_to_last_idx].clue_type and 
+                result[second_to_last_idx].clue_type.lower() == 'person'):
+                # Look for a Place clue to swap with
+                for i in range(len(result) - 2):
+                    if (result[i].clue_type and 
+                        result[i].clue_type.lower() == 'place'):
+                        # Swap to get Place as second-to-last
+                        result[i], result[second_to_last_idx] = result[second_to_last_idx], result[i]
+                        break
+        
+        # Add remaining other clues at random positions (but not first)
+        for clue in other_clues:
+            pos = random.randint(1, len(result))  # Start from position 1 to preserve Place-first
+            result.insert(pos, clue)
+            
+        return result
+
+    def _follows_alternating_types(self, shuffled_clues: List[Clue]) -> bool:
+        """Check if the sequence alternates between Person and Place types where possible"""
+        # If we don't have type information, don't enforce this constraint
+        typed_clues = [clue for clue in shuffled_clues if clue.clue_type and clue.clue_type.lower() in ['person', 'place']]
+        
+        if len(typed_clues) < 2:
+            return True  # Not enough typed clues to enforce alternation
+        
+        # Count violations of alternating pattern
+        violations = 0
+        for i in range(len(shuffled_clues) - 1):
+            current_type = shuffled_clues[i].clue_type
+            next_type = shuffled_clues[i + 1].clue_type
+            
+            # If both clues have types and they're the same, it's a violation
+            if (current_type and next_type and 
+                current_type.lower() in ['person', 'place'] and 
+                next_type.lower() in ['person', 'place'] and
+                current_type.lower() == next_type.lower()):
+                violations += 1
+        
+        # Allow some flexibility - reject only if more than half the adjacent pairs are violations
+        return violations <= len(shuffled_clues) // 2
 
     def _record_constraints(self, shuffled_clues: List[Clue], used_first_clues: set, used_consecutive_pairs: set):
         """Record constraints for a valid sequence"""
@@ -499,15 +605,17 @@ def main():
 
                 # Create initial Clues sheet with sample data
                 sample_clues = [
-                    ["Clue", "Answer/Location/Person"],
-                    ["What has keys but can't open locks?", "Piano"],
-                    ["What has a face and two hands but no arms or legs?", "Clock"],
-                    ["Who created this scavenger hunt?", "Kevin"],
-                    ["Where do you cook your meals?", "Kitchen"],
-                    ["What room has books but no bookshelf?", "Library"],
-                    ["Where do cars sleep at night?", "Garage"],
-                    ["What's the coldest appliance in the house?", "Refrigerator"],
-                    ["Where do you wash your hands before dinner?", "Bathroom sink"],
+                    ["Clue", "Answer/Location/Person", "Type"],
+                    ["What has keys but can't open locks?", "Piano", "Place"],
+                    ["What has a face and two hands but no arms or legs?", "Clock", "Place"],
+                    ["Who created this scavenger hunt?", "Kevin", "Person"],
+                    ["Where do you cook your meals?", "Kitchen", "Place"],
+                    ["Who is your favorite teacher?", "Mrs. Smith", "Person"],
+                    ["What room has books but no bookshelf?", "Library", "Place"],
+                    ["Where do cars sleep at night?", "Garage", "Place"],
+                    ["Who can help you check out a book?", "Librarian", "Person"],
+                    ["What's the coldest appliance in the house?", "Refrigerator", "Place"],
+                    ["Where do you wash your hands before dinner?", "Bathroom sink", "Place"],
                 ]
                 sheets_handler.write_to_sheet(
                     spreadsheet_id, args.input_sheet, sample_clues
@@ -532,15 +640,17 @@ def main():
 
             # Create the sheet with sample data
             sample_clues = [
-                ["Clue", "Answer/Location/Person"],
-                ["What has keys but can't open locks?", "Piano"],
-                ["What has a face and two hands but no arms or legs?", "Clock"],
-                ["Who created this scavenger hunt?", "Kevin"],
-                ["Where do you cook your meals?", "Kitchen"],
-                ["What room has books but no bookshelf?", "Library"],
-                ["Where do cars sleep at night?", "Garage"],
-                ["What's the coldest appliance in the house?", "Refrigerator"],
-                ["Where do you wash your hands before dinner?", "Bathroom sink"],
+                ["Clue", "Answer/Location/Person", "Type"],
+                ["What has keys but can't open locks?", "Piano", "Place"],
+                ["What has a face and two hands but no arms or legs?", "Clock", "Place"],
+                ["Who created this scavenger hunt?", "Kevin", "Person"],
+                ["Where do you cook your meals?", "Kitchen", "Place"],
+                ["Who is your favorite teacher?", "Mrs. Smith", "Person"],
+                ["What room has books but no bookshelf?", "Library", "Place"],
+                ["Where do cars sleep at night?", "Garage", "Place"],
+                ["Who can help you check out a book?", "Librarian", "Person"],
+                ["What's the coldest appliance in the house?", "Refrigerator", "Place"],
+                ["Where do you wash your hands before dinner?", "Bathroom sink", "Place"],
             ]
             sheets_handler.write_to_sheet(
                 spreadsheet_id, args.input_sheet, sample_clues
@@ -553,7 +663,7 @@ def main():
             print(
                 f"🔗 Edit the spreadsheet here: https://docs.google.com/spreadsheets/d/{spreadsheet_id}"
             )
-            print("\nFormat: Column A = Clue/Question, Column B = Answer/Location/Person")
+            print("\nFormat: Column A = Clue/Question, Column B = Answer/Location/Person, Column C = Type (Person/Place)")
             sys.exit(0)
 
         # Read clues from the sheet

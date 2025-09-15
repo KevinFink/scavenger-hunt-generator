@@ -131,9 +131,11 @@ function readCluesFromSheet(spreadsheet) {
   for (let i = startRow; i < values.length; i++) {
     const row = values[i];
     if (row.length >= 2 && row[0] && row[1]) {
+      const clueType = row.length >= 3 && row[2] ? row[2].toString().trim() : null;
       clues.push({
         question: row[0].toString().trim(),
-        answer: row[1].toString().trim()
+        answer: row[1].toString().trim(),
+        clueType: clueType
       });
     }
   }
@@ -166,13 +168,18 @@ function generateHuntSequences(clues, numGroups) {
     while (sequence === null && attempts < maxAttempts) {
       attempts++;
       
-      // Create a shuffled copy of randomizable clues for this group
-      const shuffledClues = [...randomizableClues];
-      shuffleArray(shuffledClues);
+      // Try to create a sequence that alternates types when possible
+      let shuffledClues = createAlternatingSequence(randomizableClues);
       
-      // Check if this sequence violates constraints
-      if (violatesConstraints(shuffledClues, usedFirstClues, usedConsecutivePairs)) {
-        continue; // Try again with a different shuffle
+      // If alternating didn't work well, fall back to random shuffle
+      if (shuffledClues === null || violatesConstraints(shuffledClues, usedFirstClues, usedConsecutivePairs)) {
+        shuffledClues = [...randomizableClues];
+        shuffleArray(shuffledClues);
+        
+        // Check if this sequence violates constraints
+        if (violatesConstraints(shuffledClues, usedFirstClues, usedConsecutivePairs)) {
+          continue; // Try again with a different shuffle
+        }
       }
       
       // Create sequence for this group (randomizable clues + final clue)
@@ -225,11 +232,127 @@ function generateHuntSequences(clues, numGroups) {
 }
 
 /**
+ * Create a sequence that tries to alternate between Person and Place types
+ */
+function createAlternatingSequence(clues) {
+  // Separate clues by type
+  const personClues = clues.filter(c => c.clueType && c.clueType.toLowerCase() === 'person');
+  const placeClues = clues.filter(c => c.clueType && c.clueType.toLowerCase() === 'place');
+  const otherClues = clues.filter(c => !c.clueType || !['person', 'place'].includes(c.clueType.toLowerCase()));
+  
+  // If we don't have any place clues, return null (first clue must be Place)
+  if (placeClues.length === 0) {
+    return null;
+  }
+  
+  // If we don't have enough typed clues, return null to use random shuffle
+  if (personClues.length + placeClues.length < 2) {
+    return null;
+  }
+  
+  // Shuffle each type separately
+  shuffleArray(personClues);
+  shuffleArray(placeClues);
+  shuffleArray(otherClues);
+  
+  // Build alternating sequence
+  const result = [];
+  let personIdx = 0;
+  let placeIdx = 0;
+  
+  // REQUIREMENT: First clue must always be a Place
+  let currentType = 'place';
+  
+  // Create alternating sequence
+  const totalTyped = personClues.length + placeClues.length;
+  for (let i = 0; i < totalTyped; i++) {
+    if (currentType === 'place' && placeIdx < placeClues.length) {
+      result.push(placeClues[placeIdx]);
+      placeIdx++;
+      currentType = 'person';
+    } else if (currentType === 'person' && personIdx < personClues.length) {
+      result.push(personClues[personIdx]);
+      personIdx++;
+      currentType = 'place';
+    } else if (placeIdx < placeClues.length) {
+      result.push(placeClues[placeIdx]);
+      placeIdx++;
+      currentType = 'person';
+    } else if (personIdx < personClues.length) {
+      result.push(personClues[personIdx]);
+      personIdx++;
+      currentType = 'place';
+    }
+  }
+  
+  // PREFERENCE: Try to make second-to-last clue a Place
+  if (result.length >= 2) {
+    const secondToLastIdx = result.length - 2;
+    if (result[secondToLastIdx].clueType && 
+        result[secondToLastIdx].clueType.toLowerCase() === 'person') {
+      // Look for a Place clue to swap with
+      for (let i = 0; i < result.length - 2; i++) {
+        if (result[i].clueType && 
+            result[i].clueType.toLowerCase() === 'place') {
+          // Swap to get Place as second-to-last
+          [result[i], result[secondToLastIdx]] = [result[secondToLastIdx], result[i]];
+          break;
+        }
+      }
+    }
+  }
+  
+  // Add remaining other clues at random positions (but not first)
+  for (const clue of otherClues) {
+    const pos = Math.floor(Math.random() * result.length) + 1; // Start from position 1 to preserve Place-first
+    result.splice(pos, 0, clue);
+  }
+  
+  return result;
+}
+
+/**
+ * Check if the sequence alternates between Person and Place types where possible
+ */
+function followsAlternatingTypes(shuffledClues) {
+  // If we don't have type information, don't enforce this constraint
+  const typedClues = shuffledClues.filter(clue => 
+    clue.clueType && ['person', 'place'].includes(clue.clueType.toLowerCase()));
+  
+  if (typedClues.length < 2) {
+    return true; // Not enough typed clues to enforce alternation
+  }
+  
+  // Count violations of alternating pattern
+  let violations = 0;
+  for (let i = 0; i < shuffledClues.length - 1; i++) {
+    const currentType = shuffledClues[i].clueType;
+    const nextType = shuffledClues[i + 1].clueType;
+    
+    // If both clues have types and they're the same, it's a violation
+    if (currentType && nextType &&
+        ['person', 'place'].includes(currentType.toLowerCase()) &&
+        ['person', 'place'].includes(nextType.toLowerCase()) &&
+        currentType.toLowerCase() === nextType.toLowerCase()) {
+      violations++;
+    }
+  }
+  
+  // Allow some flexibility - reject only if more than half the adjacent pairs are violations
+  return violations <= Math.floor(shuffledClues.length / 2);
+}
+
+/**
  * Check if a sequence violates constraints
  */
 function violatesConstraints(shuffledClues, usedFirstClues, usedConsecutivePairs) {
   // Rule 1: No group can have the same first clue as another group
   if (usedFirstClues.has(shuffledClues[0].question)) {
+    return true;
+  }
+  
+  // Rule 1b: First clue must always be a Place
+  if (shuffledClues[0].clueType && shuffledClues[0].clueType.toLowerCase() !== 'place') {
     return true;
   }
   
@@ -239,6 +362,11 @@ function violatesConstraints(shuffledClues, usedFirstClues, usedConsecutivePairs
     if (usedConsecutivePairs.has(pair)) {
       return true;
     }
+  }
+  
+  // Rule 3: Try to alternate Person and Place types
+  if (!followsAlternatingTypes(shuffledClues)) {
+    return true;
   }
   
   return false;
@@ -414,15 +542,17 @@ function createSampleClues(spreadsheet) {
     
     // Sample clues data
     const sampleData = [
-      ['Clue', 'Answer/Location/Person'],
-      ['What has keys but can\'t open locks?', 'Piano'],
-      ['What has a face and two hands but no arms or legs?', 'Clock'],
-      ['Who created this scavenger hunt?', 'Kevin'],
-      ['Where do you cook your meals?', 'Kitchen'],
-      ['What room has books but no bookshelf?', 'Library'],
-      ['Where do cars sleep at night?', 'Garage'],
-      ['What\'s the coldest appliance in the house?', 'Refrigerator'],
-      ['Where do you wash your hands before dinner?', 'Bathroom sink']
+      ['Clue', 'Answer/Location/Person', 'Type'],
+      ['What has keys but can\'t open locks?', 'Piano', 'Place'],
+      ['What has a face and two hands but no arms or legs?', 'Clock', 'Place'],
+      ['Who created this scavenger hunt?', 'Kevin', 'Person'],
+      ['Where do you cook your meals?', 'Kitchen', 'Place'],
+      ['Who is your favorite teacher?', 'Mrs. Smith', 'Person'],
+      ['What room has books but no bookshelf?', 'Library', 'Place'],
+      ['Where do cars sleep at night?', 'Garage', 'Place'],
+      ['Who can help you check out a book?', 'Librarian', 'Person'],
+      ['What\'s the coldest appliance in the house?', 'Refrigerator', 'Place'],
+      ['Where do you wash your hands before dinner?', 'Bathroom sink', 'Place']
     ];
     
     // Write sample data
@@ -441,6 +571,7 @@ function createSampleClues(spreadsheet) {
     ui.alert(
       'Sample Clues Created',
       'Sample clues have been added to the "Clues" sheet.\n\n' +
+      'Format: Column A = Clue/Question, Column B = Answer/Location/Person, Column C = Type (Person/Place)\n\n' +
       'Edit the clues as needed, then use "Generate Hunt" to create your scavenger hunt.',
       ui.ButtonSet.OK
     );
